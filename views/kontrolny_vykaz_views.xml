@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- List View -->
+    <record id="view_kontrolny_vykaz_list" model="ir.ui.view">
+        <field name="name">kontrolny.vykaz.list</field>
+        <field name="model">kontrolny.vykaz</field>
+        <field name="arch" type="xml">
+            <list>
+                <field name="name"/>
+                <field name="month"/>
+                <field name="year"/>
+                <field name="date_from"/>
+                <field name="date_to"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="total_a_base" sum="Total Base"/>
+                <field name="total_a_tax" sum="Total VAT"/>
+                <field name="state"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- Form View -->
+    <record id="view_kontrolny_vykaz_form" model="ir.ui.view">
+        <field name="name">kontrolny.vykaz.form</field>
+        <field name="model">kontrolny.vykaz</field>
+        <field name="arch" type="xml">
+            <form>
+                <header>
+                    <button name="action_generate_statement" string="Generate KV" type="object" 
+                            class="oe_highlight" invisible="state != 'draft'"/>
+                    <button name="action_confirm" string="Confirm" type="object" 
+                            class="oe_highlight" invisible="state != 'generated'"/>
+                    <button name="action_export" string="Export" type="object" 
+                            class="oe_highlight" invisible="state != 'confirmed'"/>
+                    <button name="action_reset_to_draft" string="Reset to Draft" type="object" 
+                            invisible="state == 'draft'"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1>
+                            <field name="name"/>
+                        </h1>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="month"/>
+                            <field name="year"/>
+                            <field name="date_from"/>
+                            <field name="date_to"/>
+                        </group>
+                        <group>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                            <field name="currency_id" invisible="1"/>
+                        </group>
+                    </group>
+                    
+                    <!-- Summary Section -->
+                    <group string="Summary" invisible="state == 'draft'">
+                        <field name="total_a_base" widget="monetary"/>
+                        <field name="total_a_tax" widget="monetary"/>
+                    </group>
+                    
+                    <!-- Section A - Customer Invoices -->
+                    <notebook>
+                        <page string="Section A - Customer Invoices" invisible="state == 'draft'">
+                            <field name="a_section_line_ids">
+                                <list>
+                                    <field name="partner_id"/>
+                                    <field name="partner_vat"/>
+                                    <field name="invoice_number"/>
+                                    <field name="invoice_date"/>
+                                    <field name="supply_date"/>
+                                    <field name="base_amount" sum="Total Base"/>
+                                    <field name="tax_rate"/>
+                                    <field name="tax_amount" sum="Total VAT"/>
+                                </list>
+                                <form>
+                                    <group>
+                                        <group>
+                                            <field name="partner_id"/>
+                                            <field name="partner_vat"/>
+                                            <field name="invoice_id"/>
+                                            <field name="invoice_number"/>
+                                        </group>
+                                        <group>
+                                            <field name="invoice_date"/>
+                                            <field name="supply_date"/>
+                                            <field name="base_amount"/>
+                                            <field name="tax_rate"/>
+                                            <field name="tax_amount"/>
+                                            <field name="currency_id" invisible="1"/>
+                                        </group>
+                                    </group>
+                                </form>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+                <div class="oe_chatter">
+                    <field name="message_follower_ids"/>
+                    <field name="activity_ids"/>
+                    <field name="message_ids"/>
+                </div>
+            </form>
+        </field>
+    </record>
+
+    <!-- Action -->
+    <record id="action_kontrolny_vykaz" model="ir.actions.act_window">
+        <field name="name">VAT Control Statement</field>
+        <field name="res_model">kontrolny.vykaz</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

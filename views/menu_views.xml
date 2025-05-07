@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <menuitem id="menu_kontrolny_vykaz"
+        name="Kontrolný výkaz"
+        parent="account.menu_finance_reports"
+        action="action_kontrolny_vykaz"
+        sequence="12"
+        groups="account.group_account_manager"/>
+</odoo>
