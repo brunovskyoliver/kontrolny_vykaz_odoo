@@ -1,4 +1,7 @@
 from odoo import models, fields, api
+import base64
+import xlsxwriter
+from io import BytesIO
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
@@ -44,6 +47,10 @@ class KontrolnyVykaz(models.Model):
         ('12', 'December')
     ], string='Month', required=True)
     year = fields.Integer(string='Year', required=True, default=lambda self: datetime.now().year)
+    
+    # Excel export fields
+    excel_file = fields.Binary('Excel File', readonly=True)
+    excel_filename = fields.Char('Excel Filename', readonly=True)
     
     @api.model_create_multi
     def create(self, vals_list):
@@ -191,6 +198,167 @@ class KontrolnyVykaz(models.Model):
         self.ensure_one()
         self.state = 'draft'
         return True
+    
+    def action_export_excel(self):
+        """Export KV data to Excel file matching the required format"""
+        self.ensure_one()
+        
+        if self.state not in ['generated', 'confirmed', 'exported']:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Export Error',
+                    'message': 'Please generate the Control Statement first.',
+                    'type': 'warning',
+                    'sticky': False,
+                }
+            }
+        
+        # Create Excel file in memory
+        output = BytesIO()
+        workbook = xlsxwriter.Workbook(output)
+        worksheet = workbook.add_worksheet('KV DPHS')
+        
+        # Define formats
+        header_format = workbook.add_format({
+            'bold': True, 
+            'align': 'center', 
+            'valign': 'vcenter', 
+            'bg_color': '#D3D3D3'
+        })
+        date_format = workbook.add_format({'num_format': 'mm/dd/yy'})
+        number_format = workbook.add_format({'num_format': '#,##0.00'})
+        
+        # Write headers
+        headers = [
+            'ns1:IcDphPlatitela', 'ns1:Druh', 'ns1:Rok', 'ns1:Mesiac', 'ns1:Nazov', 
+            'ns1:Stat', 'ns1:Obec', 'ns1:PSC', 'ns1:Ulica', 'ns1:Cislo', 'ns1:Tel', 'ns1:Email',
+            'Odb', 'F', 'Den', 'Z', 'D', 'S', 'Odb2', 'FO', 'FP', 'ZR', 'DR', 'S3', 'Z4', 'D5', 'ZZn', 'DZn'
+        ]
+        
+        for col, header in enumerate(headers):
+            worksheet.write(0, col, header, header_format)
+        
+        # Get company data
+        company = self.company_id
+        
+        # Process regular lines (with VAT ID)
+        row = 1
+        regular_lines = self.a_section_line_ids.filtered(lambda l: not l.is_summary)
+        
+        for line in regular_lines:
+            # Skip if no partner VAT (should be handled in summary)
+            if not line.partner_vat or not line.partner_vat.upper().startswith('SK'):
+                continue
+                
+            # Format date as MM/DD/YY
+            date_str = line.invoice_date.strftime('%m/%d/%y') if line.invoice_date else ''
+            
+            # Basic columns
+            worksheet.write(row, 0, company.vat or '')  # ns1:IcDphPlatitela
+            worksheet.write(row, 1, 'R')                # ns1:Druh (always R)
+            worksheet.write(row, 2, self.year)          # ns1:Rok
+            worksheet.write(row, 3, int(self.month))    # ns1:Mesiac
+            worksheet.write(row, 4, company.name or '') # ns1:Nazov
+            
+            # Company address details
+            worksheet.write(row, 5, company.country_id.name or 'Slovensko')  # ns1:Stat
+            worksheet.write(row, 6, company.city or '')                      # ns1:Obec
+            worksheet.write(row, 7, company.zip or '')                       # ns1:PSC
+            worksheet.write(row, 8, company.street or '')                    # ns1:Ulica
+            worksheet.write(row, 9, company.street2 or '')                   # ns1:Cislo
+            worksheet.write(row, 10, company.phone or '')                    # ns1:Tel
+            worksheet.write(row, 11, company.email or '')                    # ns1:Email
+            
+            # Invoice details
+            worksheet.write(row, 12, line.partner_vat or '')                 # Odb (customer VAT)
+            worksheet.write(row, 13, line.invoice_number or '')              # F (invoice number)
+            worksheet.write(row, 14, date_str)                               # Den (date)
+            worksheet.write(row, 15, line.base_amount, number_format)        # Z (base amount)
+            worksheet.write(row, 16, line.tax_amount, number_format)         # D (tax amount)
+            worksheet.write(row, 17, int(line.tax_rate))                     # S (tax rate)
+            
+            # Extra columns (mostly empty for regular entries)
+            worksheet.write(row, 18, '')  # Odb2
+            worksheet.write(row, 19, '')  # FO
+            worksheet.write(row, 20, '')  # FP
+            worksheet.write(row, 21, '')  # ZR
+            worksheet.write(row, 22, '')  # DR
+            worksheet.write(row, 23, '')  # S3
+            worksheet.write(row, 24, self.total_a_base, number_format)  # Z4 (total base)
+            worksheet.write(row, 25, self.total_a_tax, number_format)   # D5 (total tax)
+            worksheet.write(row, 26, 0)   # ZZn
+            worksheet.write(row, 27, 0)   # DZn
+            
+            row += 1
+        
+        # Process summary lines for individuals (no VAT ID) at the end
+        summary_lines = self.a_section_line_ids.filtered(lambda l: l.is_summary)
+        
+        for line in summary_lines:
+            # Format date as MM/DD/YY
+            date_str = line.invoice_date.strftime('%m/%d/%y') if line.invoice_date else ''
+            
+            # Basic columns (same as regular lines)
+            worksheet.write(row, 0, company.vat or '')  # ns1:IcDphPlatitela
+            worksheet.write(row, 1, 'R')                # ns1:Druh (always R)
+            worksheet.write(row, 2, self.year)          # ns1:Rok
+            worksheet.write(row, 3, int(self.month))    # ns1:Mesiac
+            worksheet.write(row, 4, company.name or '') # ns1:Nazov
+            
+            # Company address details (same as regular lines)
+            worksheet.write(row, 5, company.country_id.name or 'Slovensko')  # ns1:Stat
+            worksheet.write(row, 6, company.city or '')                      # ns1:Obec
+            worksheet.write(row, 7, company.zip or '')                       # ns1:PSC
+            worksheet.write(row, 8, company.street or '')                    # ns1:Ulica
+            worksheet.write(row, 9, company.street2 or '')                   # ns1:Cislo
+            worksheet.write(row, 10, company.phone or '')                    # ns1:Tel
+            worksheet.write(row, 11, company.email or '')                    # ns1:Email
+            
+            # For individuals, the VAT ID (Odb) is blank or can be "Individuals"
+            worksheet.write(row, 12, '')                                     # Odb (blank for individuals)
+            worksheet.write(row, 13, line.invoice_number or '')              # F (summary invoice number)
+            worksheet.write(row, 14, date_str)                               # Den (date)
+            worksheet.write(row, 15, line.base_amount, number_format)        # Z (base amount)
+            worksheet.write(row, 16, line.tax_amount, number_format)         # D (tax amount)
+            worksheet.write(row, 17, int(line.tax_rate))                     # S (tax rate)
+            
+            # Extra columns (same as regular lines)
+            worksheet.write(row, 18, '')  # Odb2
+            worksheet.write(row, 19, '')  # FO
+            worksheet.write(row, 20, '')  # FP
+            worksheet.write(row, 21, '')  # ZR
+            worksheet.write(row, 22, '')  # DR
+            worksheet.write(row, 23, '')  # S3
+            worksheet.write(row, 24, self.total_a_base, number_format)  # Z4 (total base)
+            worksheet.write(row, 25, self.total_a_tax, number_format)   # D5 (total tax)
+            worksheet.write(row, 26, 0)   # ZZn
+            worksheet.write(row, 27, 0)   # DZn
+            
+            row += 1
+        
+        # Adjust column widths
+        for col, header in enumerate(headers):
+            worksheet.set_column(col, col, len(header) + 2)
+        
+        workbook.close()
+        
+        # Set excel file and filename
+        filename = f'KV_DPHS_{self.year}_{self.month}.xlsx'
+        file_data = base64.b64encode(output.getvalue())
+        
+        self.write({
+            'excel_file': file_data,
+            'excel_filename': filename,
+            'state': 'exported' if self.state != 'exported' else self.state
+        })
+        
+        return {
+            'type': 'ir.actions.act_url',
+            'url': f'/web/content?model=kontrolny.vykaz&id={self.id}&field=excel_file&filename={filename}&download=true',
+            'target': 'self',
+        }
 
 
 class KontrolnyVykazALine(models.Model):

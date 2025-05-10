@@ -30,8 +30,10 @@
                             class="oe_highlight" invisible="state != 'draft'"/>
                     <button name="action_confirm" string="Confirm" type="object" 
                             class="oe_highlight" invisible="state != 'generated'"/>
-                    <button name="action_export" string="Export" type="object" 
+                    <button name="action_export" string="Export to XML" type="object" 
                             class="oe_highlight" invisible="state != 'confirmed'"/>
+                    <button name="action_export_excel" string="Export to Excel" type="object"
+                            class="oe_highlight" invisible="state == 'draft'"/>
                     <button name="action_reset_to_draft" string="Reset to Draft" type="object" 
                             invisible="state == 'draft'"/>
                     <field name="state" widget="statusbar"/>
@@ -52,6 +54,8 @@
                         <group>
                             <field name="company_id" groups="base.group_multi_company"/>
                             <field name="currency_id" invisible="1"/>
+                            <field name="excel_file" filename="excel_filename" invisible="1"/>
+                            <field name="excel_filename" invisible="1"/>
                         </group>
                     </group>
                     
@@ -74,6 +78,7 @@
                                     <field name="base_amount" sum="Total Base"/>
                                     <field name="tax_rate"/>
                                     <field name="tax_amount" sum="Total VAT"/>
+                                    <field name="is_summary" invisible="1"/>
                                 </list>
                                 <form>
                                     <group>
@@ -82,6 +87,7 @@
                                             <field name="partner_vat"/>
                                             <field name="invoice_id"/>
                                             <field name="invoice_number"/>
+                                            <field name="is_summary"/>
                                         </group>
                                         <group>
                                             <field name="invoice_date"/>
