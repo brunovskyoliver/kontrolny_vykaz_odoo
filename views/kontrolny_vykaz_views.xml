@@ -65,14 +65,14 @@
                     <group string="Súhrn" invisible="state == 'draft'">
                         <field name="total_a_base" widget="monetary"/>
                         <field name="total_a_tax" widget="monetary"/>
-                        <div class="alert alert-info text-center" role="alert" invisible="state != 'exported'">
+                        <!--<div class="alert alert-info text-center" role="alert" invisible="state != 'exported'">
                             <strong>Poznámka:</strong> V súlade s požiadavkami finančnej správy, súhrnné záznamy pre fyzické osoby 
                             bez IČ DPH sú zahrnuté v celkových sumách, ale nie sú zobrazené ako samostatné A1 záznamy v XML súbore.
                         </div>
                         <div class="alert alert-warning text-center" role="alert" invisible="state != 'exported'">
                             <strong>Upozornenie:</strong> Záznamy pre partnerov s IČ DPH SK, ktorí majú nastavené pole 'x_platca_dph' na Nepravda, 
                             budú zahrnuté v XML exporte bez čísla IČ DPH v atribúte Odb.
-                        </div>
+                        </div> -->
                     </group>
                     
                     <!-- Exported Files Section -->

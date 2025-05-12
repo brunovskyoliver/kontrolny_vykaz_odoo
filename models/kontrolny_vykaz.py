@@ -112,11 +112,9 @@ class KontrolnyVykaz(models.Model):
         
         # Process each invoice
         for invoice in invoices:
-            # Check if partner is a Slovak VAT payer and has x_platca_dph set to True
-            is_sk_vat_payer = (invoice.partner_id.vat and 
-                              invoice.partner_id.vat.upper().startswith('SK') and 
-                              hasattr(invoice.partner_id, 'x_platca_dph') and 
-                              invoice.partner_id.x_platca_dph)
+            # Check if the partner has a Slovak VAT ID - that's the ONLY condition for going into separate A1 records
+            # The x_platca_dph field only affects whether the VAT ID is shown in the XML/Excel
+            has_vat_id = invoice.partner_id.vat and invoice.partner_id.vat.upper().startswith('SK')
             
             # Group by tax rate
             tax_groups = {}
@@ -145,8 +143,9 @@ class KontrolnyVykaz(models.Model):
                 if amounts['base'] == 0:
                     continue
                 
-                if is_sk_vat_payer:
-                    # Create individual A section line for each Slovak VAT payer
+                if has_vat_id:
+                    # Create individual A section line for each entity with Slovak VAT ID
+                    # regardless of x_platca_dph status
                     self.env['kontrolny.vykaz.a.line'].create({
                         'kontrolny_vykaz_id': self.id,
                         'partner_id': invoice.partner_id.id,
