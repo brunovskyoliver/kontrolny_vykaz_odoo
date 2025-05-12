@@ -112,8 +112,11 @@ class KontrolnyVykaz(models.Model):
         
         # Process each invoice
         for invoice in invoices:
-            # Check if partner is a Slovak VAT payer
-            is_sk_vat_payer = invoice.partner_id.vat and invoice.partner_id.vat.upper().startswith('SK')
+            # Check if partner is a Slovak VAT payer and has x_platca_dph set to True
+            is_sk_vat_payer = (invoice.partner_id.vat and 
+                              invoice.partner_id.vat.upper().startswith('SK') and 
+                              hasattr(invoice.partner_id, 'x_platca_dph') and 
+                              invoice.partner_id.x_platca_dph)
             
             # Group by tax rate
             tax_groups = {}
@@ -246,7 +249,8 @@ class KontrolnyVykaz(models.Model):
         transactions = ET.SubElement(root, "Transakcie")
         
         # Process regular Section A lines (A1 transactions - sales with VAT)
-        for line in self.a_section_line_ids:
+        # Only include lines with VAT-registered customers (exclude summary lines for individuals)
+        for line in self.a_section_line_ids.filtered(lambda l: not l.is_summary):
             if line.base_amount <= 0:
                 continue
                 
@@ -256,11 +260,11 @@ class KontrolnyVykaz(models.Model):
             # Create A1 element with attributes
             a1 = ET.SubElement(transactions, "A1")
             
-            # For VAT-registered customers
-            if line.partner_vat and line.partner_vat.upper().startswith('SK'):
+            # For VAT-registered customers, check if they're marked as VAT payers (x_platca_dph)
+            if line.partner_id and hasattr(line.partner_id, 'x_platca_dph') and line.partner_id.x_platca_dph and line.partner_vat and line.partner_vat.upper().startswith('SK'):
                 a1.set("Odb", line.partner_vat)
             else:
-                a1.set("Odb", "")  # Empty for non-VAT customers
+                a1.set("Odb", "")  # Empty for non-VAT customers or when x_platca_dph is False
                 
             a1.set("F", line.invoice_number or '')
             a1.set("Den", date_str)
@@ -275,7 +279,8 @@ class KontrolnyVykaz(models.Model):
         # c1.set("FO", "reference_number")
         # ...
         
-        # Add totals section (D2)
+        # Add totals section (D2) - This includes all transactions including those for individuals
+        # The total amounts include both regular A1 lines and summary lines (individuals without VAT ID)
         d2 = ET.SubElement(transactions, "D2")
         d2.set("Z", "{:.2f}".format(self.total_a_base))
         d2.set("D", "{:.2f}".format(self.total_a_tax))
@@ -311,7 +316,39 @@ class KontrolnyVykaz(models.Model):
             'xml_filename': filename,
             'state': 'exported'
         })
-        logging.info(f"Exported XML file: {filename}")
+        
+        # Log the export with a note about individuals
+        total_vat_registered = len(self.a_section_line_ids.filtered(lambda l: not l.is_summary))
+        total_individuals = len(self.a_section_line_ids.filtered(lambda l: l.is_summary))
+        total_with_vat_id = len(self.a_section_line_ids.filtered(lambda l: not l.is_summary and l.partner_vat and l.partner_vat.upper().startswith('SK')))
+        total_with_empty_odb = len(self.a_section_line_ids.filtered(lambda l: not l.is_summary and l.partner_vat and l.partner_vat.upper().startswith('SK') and ((hasattr(l.partner_id, 'x_platca_dph') and not l.partner_id.x_platca_dph) or not hasattr(l.partner_id, 'x_platca_dph'))))
+        
+        _logger.info(
+            f"Exported XML file: {filename} with {total_vat_registered} A1 records. "
+            f"{total_individuals} summary records for individuals were included in totals but not as A1 records. "
+            f"{total_with_vat_id} records have a Slovak VAT ID, of which {total_with_empty_odb} have x_platca_dph=False (empty Odb attribute)."
+        )
+        
+        # Display a message about individuals being excluded from A1 records
+        total_vat_registered = len(self.a_section_line_ids.filtered(lambda l: not l.is_summary))
+        total_individuals = len(self.a_section_line_ids.filtered(lambda l: l.is_summary))
+        total_with_vat_id = len(self.a_section_line_ids.filtered(lambda l: not l.is_summary and l.partner_vat and l.partner_vat.upper().startswith('SK')))
+        total_with_empty_odb = len(self.a_section_line_ids.filtered(lambda l: not l.is_summary and l.partner_vat and l.partner_vat.upper().startswith('SK') and ((hasattr(l.partner_id, 'x_platca_dph') and not l.partner_id.x_platca_dph) or not hasattr(l.partner_id, 'x_platca_dph'))))
+        
+        message = f"""
+            <p>Kontrolný výkaz bol úspešne exportovaný a stiahnutý ako XML súbor.</p>
+            <ul>
+                <li><strong>XML Súbor:</strong> {filename}</li>
+                <li><strong>Počet A1 záznamov:</strong> {total_vat_registered}</li>
+                <li><strong>Počet súhrnných záznamov pre fyzické osoby:</strong> {total_individuals}</li>
+                <li><strong>Počet záznamov s SK IČ DPH:</strong> {total_with_vat_id}</li>
+                <li><strong>Počet záznamov s prázdnym atribútom Odb (x_platca_dph=False):</strong> {total_with_empty_odb}</li>
+            </ul>
+            <p><em>Poznámka: Súhrnné záznamy pre fyzické osoby bez IČ DPH sú zahrnuté v celkových sumách, ale nie sú exportované ako samostatné A1 záznamy v XML súbore.</em></p>
+            <p><em>Upozornenie: Partneri s IČ DPH SK, ktorí majú nastavené x_platca_dph=False, majú prázdny atribút Odb v A1 záznamoch.</em></p>
+        """
+        
+        self.message_post(body=message)
         
         return {
             'type': 'ir.actions.act_url',
@@ -374,6 +411,7 @@ class KontrolnyVykaz(models.Model):
         
         for line in regular_lines:
             # Skip if no partner VAT (should be handled in summary)
+            # We leave in entries where partner has VAT but x_platca_dph is False (will have empty Odb)
             if not line.partner_vat or not line.partner_vat.upper().startswith('SK'):
                 continue
                 
@@ -397,7 +435,11 @@ class KontrolnyVykaz(models.Model):
             worksheet.write(row, 11, company.email or '')                    # ns1:Email
             
             # Invoice details
-            worksheet.write(row, 12, line.partner_vat or '')                 # Odb (customer VAT)
+            if line.partner_id and hasattr(line.partner_id, 'x_platca_dph') and line.partner_id.x_platca_dph and line.partner_vat and line.partner_vat.upper().startswith('SK'):
+                worksheet.write(row, 12, line.partner_vat or '')                 # Odb (customer VAT)
+            else:
+                worksheet.write(row, 12, '')                                     # Odb (empty for non-VAT payers)
+                
             worksheet.write(row, 13, line.invoice_number or '')              # F (invoice number)
             worksheet.write(row, 14, date_str)                               # Den (date)
             worksheet.write(row, 15, line.base_amount, number_format)        # Z (base amount)
@@ -478,6 +520,24 @@ class KontrolnyVykaz(models.Model):
             'excel_filename': filename,
             'state': 'exported' if self.state != 'exported' else self.state
         })
+        
+        # Log success message for the Excel export
+        total_vat_registered = len(self.a_section_line_ids.filtered(lambda l: not l.is_summary))
+        total_individuals = len(self.a_section_line_ids.filtered(lambda l: l.is_summary))
+        total_with_vat_id = len(self.a_section_line_ids.filtered(lambda l: not l.is_summary and l.partner_vat and l.partner_vat.upper().startswith('SK')))
+        total_with_empty_odb = len(self.a_section_line_ids.filtered(lambda l: not l.is_summary and l.partner_vat and l.partner_vat.upper().startswith('SK') and ((hasattr(l.partner_id, 'x_platca_dph') and not l.partner_id.x_platca_dph) or not hasattr(l.partner_id, 'x_platca_dph'))))
+        
+        self.message_post(body=f"""
+            <p>Kontrolný výkaz bol úspešne exportovaný do Excel súboru.</p>
+            <ul>
+                <li><strong>Excel Súbor:</strong> {filename}</li>
+                <li><strong>Počet A1 záznamov:</strong> {total_vat_registered}</li>
+                <li><strong>Počet súhrnných záznamov pre fyzické osoby:</strong> {total_individuals}</li>
+                <li><strong>Počet záznamov s SK IČ DPH:</strong> {total_with_vat_id}</li>
+                <li><strong>Počet záznamov s prázdnym atribútom Odb (x_platca_dph=False):</strong> {total_with_empty_odb}</li>
+            </ul>
+            <p><em>Poznámka: Aj v Excel súbore sa používa pole x_platca_dph na určenie, či sa má v stĺpci Odb zobraziť IČ DPH.</em></p>
+        """)
         
         return {
             'type': 'ir.actions.act_url',
