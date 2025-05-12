@@ -14,54 +14,54 @@ _logger = logging.getLogger(__name__)
 
 class KontrolnyVykaz(models.Model):
     _name = 'kontrolny.vykaz'
-    _description = 'VAT Control Statement'
+    _description = 'Kontrolný výkaz DPH'
     _inherit = ['mail.thread', 'mail.activity.mixin']
 
-    name = fields.Char('Reference', required=True, readonly=True, default='/')
-    company_id = fields.Many2one('res.company', string='Company', required=True, 
+    name = fields.Char('Referencia', required=True, readonly=True, default='/')
+    company_id = fields.Many2one('res.company', string='Spoločnosť', required=True, 
                                default=lambda self: self.env.company)
-    date_from = fields.Date('Date From', required=True)
-    date_to = fields.Date('Date To', required=True)
+    date_from = fields.Date('Dátum od', required=True)
+    date_to = fields.Date('Dátum do', required=True)
     state = fields.Selection([
-        ('draft', 'Draft'),
-        ('generated', 'Generated'),
-        ('confirmed', 'Confirmed'),
-        ('exported', 'Exported')
-    ], string='Status', default='draft', tracking=True)
+        ('draft', 'Koncept'),
+        ('generated', 'Vygenerované'),
+        ('confirmed', 'Potvrdené'),
+        ('exported', 'Exportované')
+    ], string='Stav', default='draft', tracking=True)
     
     # A-section lines (customer invoices)
     a_section_line_ids = fields.One2many('kontrolny.vykaz.a.line', 'kontrolny_vykaz_id', 
-                                        string='Section A - Customer Invoices')
+                                        string='Oddiel A - Faktúry pre odberateľov')
     
     # Summary fields
-    total_a_base = fields.Monetary(string='Total A Section Base', compute='_compute_totals', store=True)
-    total_a_tax = fields.Monetary(string='Total A Section VAT', compute='_compute_totals', store=True)
+    total_a_base = fields.Monetary(string='Základ dane oddiel A', compute='_compute_totals', store=True)
+    total_a_tax = fields.Monetary(string='DPH oddiel A', compute='_compute_totals', store=True)
     currency_id = fields.Many2one(related='company_id.currency_id', readonly=True)
     
     # For month selection
     month = fields.Selection([
-        ('01', 'January'),
-        ('02', 'February'),
-        ('03', 'March'),
-        ('04', 'April'),
-        ('05', 'May'),
-        ('06', 'June'),
-        ('07', 'July'),
+        ('01', 'Január'),
+        ('02', 'Február'),
+        ('03', 'Marec'),
+        ('04', 'Apríl'),
+        ('05', 'Máj'),
+        ('06', 'Jún'),
+        ('07', 'Júl'),
         ('08', 'August'),
         ('09', 'September'),
-        ('10', 'October'),
+        ('10', 'Október'),
         ('11', 'November'),
         ('12', 'December')
-    ], string='Month', required=True)
-    year = fields.Integer(string='Year', required=True, default=lambda self: datetime.now().year)
+    ], string='Mesiac', required=True)
+    year = fields.Integer(string='Rok', required=True, default=lambda self: datetime.now().year)
     
     # Excel export fields
-    excel_file = fields.Binary('Excel File', readonly=True)
-    excel_filename = fields.Char('Excel Filename', readonly=True)
+    excel_file = fields.Binary('Excel súbor', readonly=True)
+    excel_filename = fields.Char('Názov Excel súboru', readonly=True)
     
     # XML export fields 
-    xml_file = fields.Binary('XML File', readonly=True)
-    xml_filename = fields.Char('XML Filename', readonly=True)
+    xml_file = fields.Binary('XML súbor', readonly=True)
+    xml_filename = fields.Char('Názov XML súboru', readonly=True)
     
     @api.model_create_multi
     def create(self, vals_list):
@@ -98,13 +98,13 @@ class KontrolnyVykaz(models.Model):
         """Generate lines for Section A (sales to VAT payers) and summarize individuals"""
         self.ensure_one()
         
-        # Get all customer invoices for the period
+        # Get all customer invoices for the period based on taxable supply date
         invoices = self.env['account.move'].search([
             ('company_id', '=', self.company_id.id),
             ('move_type', 'in', ['out_invoice', 'out_refund']),
             ('state', '=', 'posted'),
-            ('invoice_date', '>=', self.date_from),
-            ('invoice_date', '<=', self.date_to),
+            ('taxable_supply_date', '>=', self.date_from),
+            ('taxable_supply_date', '<=', self.date_to),
         ])
         
         # Storage for individuals summary (grouped by tax rate)
@@ -177,7 +177,7 @@ class KontrolnyVykaz(models.Model):
                     'partner_id': False,
                     'partner_vat': 'Individuals',
                     'invoice_id': False,
-                    'invoice_number': f'Summary ({data["count"]} invoices)',
+                    'invoice_number': f'Súhrn ({data["count"]} faktúr)',
                     'invoice_date': self.date_to,
                     'supply_date': self.date_to,
                     'base_amount': data['base'],
@@ -200,8 +200,8 @@ class KontrolnyVykaz(models.Model):
                 'type': 'ir.actions.client',
                 'tag': 'display_notification',
                 'params': {
-                    'title': 'Export Error',
-                    'message': 'Please confirm the Control Statement first.',
+                    'title': 'Chyba exportu',
+                    'message': 'Prosím, najprv potvrďte kontrolný výkaz.',
                     'type': 'warning',
                     'sticky': False,
                 }
@@ -230,7 +230,7 @@ class KontrolnyVykaz(models.Model):
         # Period information
         period = ET.SubElement(identification, "Obdobie")
         ET.SubElement(period, "Rok").text = str(self.year)
-        ET.SubElement(period, "Mesiac").text = str(self.month)
+        ET.SubElement(period, "Mesiac").text = str(int(self.month))
         
         # Company details
         ET.SubElement(identification, "Nazov").text = company.name or ''
@@ -251,7 +251,7 @@ class KontrolnyVykaz(models.Model):
                 continue
                 
             # Format date as YYYY-MM-DD
-            date_str = line.invoice_date.strftime('%Y-%m-%d') if line.invoice_date else ''
+            date_str = line.supply_date.strftime('%Y-%m-%d') if line.supply_date else ''
             
             # Create A1 element with attributes
             a1 = ET.SubElement(transactions, "A1")
@@ -303,7 +303,7 @@ class KontrolnyVykaz(models.Model):
             pretty_xml = xml_declaration + pretty_xml
         
         # Set xml file and filename
-        filename = f'KVDPH_{self.year}_MESIAC_{self.month}.XML'
+        filename = f'KVDPH_{self.year}_MESIAC_{int(self.month)}.XML'
         file_data = base64.b64encode(pretty_xml.encode('utf-8'))
         
         self.write({
@@ -333,8 +333,8 @@ class KontrolnyVykaz(models.Model):
                 'type': 'ir.actions.client',
                 'tag': 'display_notification',
                 'params': {
-                    'title': 'Export Error',
-                    'message': 'Please generate the Control Statement first.',
+                    'title': 'Chyba exportu',
+                    'message': 'Prosím, najprv vygenerujte kontrolný výkaz.',
                     'type': 'warning',
                     'sticky': False,
                 }
@@ -378,7 +378,7 @@ class KontrolnyVykaz(models.Model):
                 continue
                 
             # Format date as MM/DD/YY
-            date_str = line.invoice_date.strftime('%m/%d/%y') if line.invoice_date else ''
+            date_str = line.supply_date.strftime('%m/%d/%y') if line.supply_date else ''
             
             # Basic columns
             worksheet.write(row, 0, company.vat or '')  # ns1:IcDphPlatitela
@@ -423,7 +423,7 @@ class KontrolnyVykaz(models.Model):
         
         for line in summary_lines:
             # Format date as MM/DD/YY
-            date_str = line.invoice_date.strftime('%m/%d/%y') if line.invoice_date else ''
+            date_str = line.supply_date.strftime('%m/%d/%y') if line.supply_date else ''
             
             # Basic columns (same as regular lines)
             worksheet.write(row, 0, company.vat or '')  # ns1:IcDphPlatitela
@@ -470,7 +470,7 @@ class KontrolnyVykaz(models.Model):
         workbook.close()
         
         # Set excel file and filename
-        filename = f'KV_DPHS_{self.year}_{self.month}.xlsx'
+        filename = f'KV_DPHS_{self.year}_{int(self.month)}.xlsx'
         file_data = base64.b64encode(output.getvalue())
         
         self.write({
@@ -488,18 +488,18 @@ class KontrolnyVykaz(models.Model):
 
 class KontrolnyVykazALine(models.Model):
     _name = 'kontrolny.vykaz.a.line'
-    _description = 'Control Statement Section A Line'
+    _description = 'Riadok oddielu A kontrolného výkazu'
     
-    kontrolny_vykaz_id = fields.Many2one('kontrolny.vykaz', string='Control Statement', ondelete='cascade')
-    partner_id = fields.Many2one('res.partner', string='Customer')
-    partner_vat = fields.Char(string='Customer VAT ID')
-    invoice_id = fields.Many2one('account.move', string='Invoice')
-    invoice_number = fields.Char(string='Invoice Number')
-    invoice_date = fields.Date(string='Invoice Date')
-    supply_date = fields.Date(string='Supply Date')
-    base_amount = fields.Monetary(string='Base Amount')
-    tax_rate = fields.Float(string='VAT Rate (%)')
-    tax_amount = fields.Monetary(string='VAT Amount')
+    kontrolny_vykaz_id = fields.Many2one('kontrolny.vykaz', string='Kontrolný výkaz', ondelete='cascade')
+    partner_id = fields.Many2one('res.partner', string='Odberateľ')
+    partner_vat = fields.Char(string='IČ DPH odberateľa')
+    invoice_id = fields.Many2one('account.move', string='Faktúra')
+    invoice_number = fields.Char(string='Číslo faktúry')
+    invoice_date = fields.Date(string='Dátum vyhotovenia')
+    supply_date = fields.Date(string='Dátum dodania')
+    base_amount = fields.Monetary(string='Základ dane')
+    tax_rate = fields.Float(string='Sadzba DPH (%)')
+    tax_amount = fields.Monetary(string='Suma DPH')
     currency_id = fields.Many2one(related='kontrolny_vykaz_id.currency_id')
-    is_summary = fields.Boolean(string='Is Summary Line', default=False,
-                             help='This is a summary line for individuals without VAT ID')
+    is_summary = fields.Boolean(string='Je súhrnný riadok', default=False,
+                             help='Toto je súhrnný riadok pre fyzické osoby bez IČ DPH')
