@@ -56,6 +56,8 @@
                             <field name="currency_id" invisible="1"/>
                             <field name="excel_file" filename="excel_filename" invisible="1"/>
                             <field name="excel_filename" invisible="1"/>
+                            <field name="xml_file" filename="xml_filename" invisible="1"/>
+                            <field name="xml_filename" invisible="1"/>
                         </group>
                     </group>
                     
@@ -63,6 +65,14 @@
                     <group string="Summary" invisible="state == 'draft'">
                         <field name="total_a_base" widget="monetary"/>
                         <field name="total_a_tax" widget="monetary"/>
+                    </group>
+                    
+                    <!-- Exported Files Section -->
+                    <group string="Exported Files" invisible="state != 'exported'">
+                        <field name="excel_file" filename="excel_filename" widget="binary" invisible="excel_filename == False"/>
+                        <field name="excel_filename" invisible="1"/>
+                        <field name="xml_file" filename="xml_filename" widget="binary" invisible="xml_filename == False"/>
+                        <field name="xml_filename" invisible="1"/>
                     </group>
                     
                     <!-- Section A - Customer Invoices -->

@@ -4,6 +4,13 @@ import xlsxwriter
 from io import BytesIO
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
+import xml.etree.ElementTree as ET
+from xml.dom import minidom
+
+import logging
+_logger = logging.getLogger(__name__)
+
+
 
 class KontrolnyVykaz(models.Model):
     _name = 'kontrolny.vykaz'
@@ -51,6 +58,10 @@ class KontrolnyVykaz(models.Model):
     # Excel export fields
     excel_file = fields.Binary('Excel File', readonly=True)
     excel_filename = fields.Char('Excel Filename', readonly=True)
+    
+    # XML export fields 
+    xml_file = fields.Binary('XML File', readonly=True)
+    xml_filename = fields.Char('XML Filename', readonly=True)
     
     @api.model_create_multi
     def create(self, vals_list):
@@ -181,17 +192,131 @@ class KontrolnyVykaz(models.Model):
         return True
     
     def action_export(self):
+        """Export KV data to XML file matching the required format for Slovak tax authorities"""
         self.ensure_one()
-        self.state = 'exported'
-        # Here you could add the export functionality for Slovak tax authorities
-        return {
-            'type': 'ir.actions.client',
-            'tag': 'display_notification',
-            'params': {
-                'title': 'Export Successful',
-                'message': 'The Control Statement has been marked as exported.',
-                'sticky': False,
+        
+        if self.state not in ['confirmed', 'exported']:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Export Error',
+                    'message': 'Please confirm the Control Statement first.',
+                    'type': 'warning',
+                    'sticky': False,
+                }
             }
+            
+        # Create XML structure
+        # Define the namespace
+        xmlns = "https://ekr.financnasprava.sk/Formulare/XSD/kv_dph_2025.xsd"
+        
+        # Root element
+        root = ET.Element("KVDPH_2025", xmlns=xmlns)
+        
+        # Identification section
+        identification = ET.SubElement(root, "Identifikacia")
+        
+        # Get company data
+        company = self.company_id
+        vat_number = company.vat or ''
+        if vat_number and not vat_number.startswith('SK'):
+            vat_number = 'SK' + vat_number.replace('SK', '')
+            
+        # Add identification details
+        ET.SubElement(identification, "IcDphPlatitela").text = vat_number
+        ET.SubElement(identification, "Druh").text = "R"  # Regular statement
+        
+        # Period information
+        period = ET.SubElement(identification, "Obdobie")
+        ET.SubElement(period, "Rok").text = str(self.year)
+        ET.SubElement(period, "Mesiac").text = str(self.month)
+        
+        # Company details
+        ET.SubElement(identification, "Nazov").text = company.name or ''
+        ET.SubElement(identification, "Stat").text = company.country_id.name or 'Slovensko'
+        ET.SubElement(identification, "Obec").text = company.city or ''
+        ET.SubElement(identification, "PSC").text = company.zip or ''
+        ET.SubElement(identification, "Ulica").text = company.street or ''
+        ET.SubElement(identification, "Cislo").text = company.street2 or ''
+        ET.SubElement(identification, "Tel").text = company.phone or ''
+        ET.SubElement(identification, "Email").text = company.email or ''
+        
+        # Transactions section
+        transactions = ET.SubElement(root, "Transakcie")
+        
+        # Process regular Section A lines (A1 transactions - sales with VAT)
+        for line in self.a_section_line_ids:
+            if line.base_amount <= 0:
+                continue
+                
+            # Format date as YYYY-MM-DD
+            date_str = line.invoice_date.strftime('%Y-%m-%d') if line.invoice_date else ''
+            
+            # Create A1 element with attributes
+            a1 = ET.SubElement(transactions, "A1")
+            
+            # For VAT-registered customers
+            if line.partner_vat and line.partner_vat.upper().startswith('SK'):
+                a1.set("Odb", line.partner_vat)
+            else:
+                a1.set("Odb", "")  # Empty for non-VAT customers
+                
+            a1.set("F", line.invoice_number or '')
+            a1.set("Den", date_str)
+            a1.set("Z", "{:.2f}".format(line.base_amount))
+            a1.set("D", "{:.2f}".format(line.tax_amount))
+            a1.set("S", str(int(line.tax_rate)))
+        
+        # If we had credit notes (C1 transactions), we would add them here
+        # For example:
+        # c1 = ET.SubElement(transactions, "C1")
+        # c1.set("Odb", vat_number)
+        # c1.set("FO", "reference_number")
+        # ...
+        
+        # Add totals section (D2)
+        d2 = ET.SubElement(transactions, "D2")
+        d2.set("Z", "{:.2f}".format(self.total_a_base))
+        d2.set("D", "{:.2f}".format(self.total_a_tax))
+        d2.set("ZZn", "0.00")
+        d2.set("DZn", "0.00")
+        
+        # Convert to properly formatted XML string
+        rough_string = ET.tostring(root, 'utf-8')
+        
+        # Add XML declaration
+        xml_declaration = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        
+        # Parse the string to get a DOM representation
+        reparsed = minidom.parseString(rough_string)
+        pretty_xml = reparsed.toprettyxml(indent="  ")
+        
+        # Remove extra blank lines that minidom sometimes adds
+        xml_lines = [line for line in pretty_xml.splitlines() if line.strip()]
+        pretty_xml = '\n'.join(xml_lines)
+        
+        # Replace the XML declaration with our custom one
+        if pretty_xml.startswith('<?xml'):
+            pretty_xml = xml_declaration + pretty_xml.split('\n', 1)[1]
+        else:
+            pretty_xml = xml_declaration + pretty_xml
+        
+        # Set xml file and filename
+        filename = f'KVDPH_{self.year}_MESIAC_{self.month}.XML'
+        file_data = base64.b64encode(pretty_xml.encode('utf-8'))
+        
+        self.write({
+            'xml_file': file_data,
+            'xml_filename': filename,
+            'state': 'exported'
+        })
+        logging.info(f"Exported XML file: {filename}")
+        
+        return {
+            'type': 'ir.actions.act_url',
+            'url': f'/web/content?model=kontrolny.vykaz&id={self.id}&field=xml_file&filename={filename}&download=true',
+            'target': 'self',
         }
     
     def action_reset_to_draft(self):
