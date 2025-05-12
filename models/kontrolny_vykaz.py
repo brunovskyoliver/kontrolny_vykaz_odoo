@@ -36,6 +36,8 @@ class KontrolnyVykaz(models.Model):
     # Summary fields
     total_a_base = fields.Monetary(string='Základ dane oddiel A', compute='_compute_totals', store=True)
     total_a_tax = fields.Monetary(string='DPH oddiel A', compute='_compute_totals', store=True)
+    total_c_base = fields.Monetary(string='Základ dane oddiel C', compute='_compute_totals', store=True)
+    total_c_tax = fields.Monetary(string='DPH oddiel C', compute='_compute_totals', store=True)
     currency_id = fields.Many2one(related='company_id.currency_id', readonly=True)
     
     # For month selection
@@ -78,11 +80,29 @@ class KontrolnyVykaz(models.Model):
             self.date_from = date_from
             self.date_to = date_to
     
-    @api.depends('a_section_line_ids.base_amount', 'a_section_line_ids.tax_amount')
+    @api.depends('a_section_line_ids.base_amount', 'a_section_line_ids.tax_amount', 'a_section_line_ids.is_refund')
     def _compute_totals(self):
         for record in self:
-            record.total_a_base = sum(record.a_section_line_ids.mapped('base_amount'))
-            record.total_a_tax = sum(record.a_section_line_ids.mapped('tax_amount'))
+            # Check all lines first to debug potential issues
+            _logger.info(f"***** Computing totals - All lines details *****")
+            for line in record.a_section_line_ids:
+                _logger.info(f"Line: invoice_number={line.invoice_number}, is_refund={line.is_refund}, base_amount={line.base_amount}, tax_amount={line.tax_amount}")
+            
+            # Regular invoices (A section)
+            a_lines = record.a_section_line_ids.filtered(lambda l: not l.is_refund)
+            record.total_a_base = sum(a_lines.mapped('base_amount'))
+            record.total_a_tax = sum(a_lines.mapped('tax_amount'))
+            
+            # Refunds (C section)
+            c_lines = record.a_section_line_ids.filtered(lambda l: l.is_refund)
+            record.total_c_base = sum(c_lines.mapped('base_amount'))
+            record.total_c_tax = sum(c_lines.mapped('tax_amount'))
+            
+            # Log totals for debugging
+            _logger.info(f"Computed totals:")
+            _logger.info(f"- Section A (regular invoices): {len(a_lines)} records, base={record.total_a_base}, tax={record.total_a_tax}")
+            _logger.info(f"- Section C (refunds): {len(c_lines)} records, base={record.total_c_base}, tax={record.total_c_tax}")
+            _logger.info(f"- Total: base={record.total_a_base + record.total_c_base}, tax={record.total_a_tax + record.total_c_tax}")
     
     def action_generate_statement(self):
         self.ensure_one()
@@ -98,27 +118,113 @@ class KontrolnyVykaz(models.Model):
         """Generate lines for Section A (sales to VAT payers) and summarize individuals"""
         self.ensure_one()
         
-        # Get all customer invoices for the period based on taxable supply date
+        # Get all invoices and refunds for the period based on dates
         invoices = self.env['account.move'].search([
             ('company_id', '=', self.company_id.id),
             ('move_type', 'in', ['out_invoice', 'out_refund']),
             ('state', '=', 'posted'),
+            '|',
+            '&',
             ('taxable_supply_date', '>=', self.date_from),
             ('taxable_supply_date', '<=', self.date_to),
+            '&',
+            ('taxable_supply_date', '=', False),
+            '&',
+            ('invoice_date', '>=', self.date_from),
+            ('invoice_date', '<=', self.date_to),
         ])
+        
+        # Also search for refunds that reference reversed invoices in our period
+        reversed_invoice_ids = invoices.filtered(lambda i: i.payment_state == 'reversed').ids
+        refunds_for_reversed = self.env['account.move'].search([
+            ('company_id', '=', self.company_id.id),
+            ('move_type', '=', 'out_refund'),
+            ('state', '=', 'posted'),
+            ('reversed_entry_id', 'in', reversed_invoice_ids)
+        ])
+        
+        # Combine all invoices and refunds, removing duplicates
+        all_documents = invoices | refunds_for_reversed
+        
+        # Log the results for debugging
+        regular_invoices = all_documents.filtered(lambda i: i.move_type == 'out_invoice' and i.payment_state != 'reversed')
+        reversed_invoices = all_documents.filtered(lambda i: i.move_type == 'out_invoice' and i.payment_state == 'reversed')
+        refunds = all_documents.filtered(lambda i: i.move_type == 'out_refund')
+        
+        _logger.info(f"Found {len(all_documents)} total invoices/refunds")
+        _logger.info(f"Regular invoices: {len(regular_invoices)}")
+        _logger.info(f"Reversed invoices: {len(reversed_invoices)}")
+        _logger.info(f"Refunds (out_refund): {len(refunds)}")
+        
+        if reversed_invoices:
+            for rev in reversed_invoices:
+                ref = self.env['account.move'].search([
+                    ('reversed_entry_id', '=', rev.id),
+                    ('move_type', '=', 'out_refund'),
+                    ('state', '=', 'posted')
+                ], limit=1)
+                if ref:
+                    _logger.info(f"Found refund {ref.name} for reversed invoice {rev.name}")
+                else:
+                    _logger.info(f"No refund found for reversed invoice {rev.name}")
         
         # Storage for individuals summary (grouped by tax rate)
         individuals_tax_groups = {}
         
-        # Process each invoice
-        for invoice in invoices:
-            # Check if the partner has a Slovak VAT ID - that's the ONLY condition for going into separate A1 records
+        # Storage for refunds summary (grouped by tax rate)
+        refunds_tax_groups = {}
+        
+        # Process each document (invoice or refund)
+        for document in all_documents:
+            # Check if the partner has a Slovak VAT ID - that's the ONLY condition for going into separate A1/C1 records
             # The x_platca_dph field only affects whether the VAT ID is shown in the XML/Excel
-            has_vat_id = invoice.partner_id.vat and invoice.partner_id.vat.upper().startswith('SK')
+            has_vat_id = document.partner_id.vat and document.partner_id.vat.upper().startswith('SK')
             
+            # Check if this is a refund (only out_refund is considered a refund now)
+            is_refund = document.move_type == 'out_refund'
+            
+            # Log whether we're marking this as a refund
+            _logger.info(f"Document {document.name} is_refund flag: {is_refund} (move_type: {document.move_type})")
+            
+            # Use taxable_supply_date if available, otherwise fall back to invoice_date
+            effective_date = document.taxable_supply_date or document.invoice_date
+            
+            # For refunds that reference a reversed invoice, use the date from the original invoice
+            if is_refund and document.reversed_entry_id:
+                original_invoice = document.reversed_entry_id
+                effective_date = original_invoice.taxable_supply_date or original_invoice.invoice_date
+                _logger.info(f"Using date {effective_date} from original invoice {original_invoice.name} for refund {document.name}")
+                
+                # Make absolutely sure this is marked as a refund
+                is_refund = True
+                _logger.info(f"Confirmed refund status for {document.name} (move_type: {document.move_type})")
+            
+            # Skip if the effective date is not in our period
+            if not effective_date or effective_date < self.date_from or effective_date > self.date_to:
+                _logger.info(f"Skipping document {document.name} with date {effective_date} outside period {self.date_from}-{self.date_to}")
+                continue
+                
+            # For debugging
+            if is_refund:
+                _logger.info(f"Processing refund: {document.name}, move_type: {document.move_type}, " 
+                           f"payment_state: {document.payment_state}, effective_date: {effective_date}")
+                if document.reversed_entry_id:
+                    _logger.info(f"  → References original invoice: {document.reversed_entry_id.name}")
+            elif document.payment_state == 'reversed':
+                _logger.info(f"Processing reversed invoice: {document.name}, move_type: {document.move_type}, " 
+                           f"payment_state: {document.payment_state}, effective_date: {effective_date}")
+                # Try to find the refund
+                refund = self.env['account.move'].search([
+                    ('reversed_entry_id', '=', document.id),
+                    ('move_type', '=', 'out_refund'),
+                    ('state', '=', 'posted')
+                ], limit=1)
+                if refund:
+                    _logger.info(f"  → Has refund: {refund.name}")
+                
             # Group by tax rate
             tax_groups = {}
-            for line in invoice.invoice_line_ids:
+            for line in document.invoice_line_ids:
                 if not line.tax_ids:
                     continue
                     
@@ -134,6 +240,14 @@ class KontrolnyVykaz(models.Model):
                     price_subtotal = line.price_subtotal
                     tax_amount = line.price_total - line.price_subtotal
                     
+                    # For refunds (out_refund only), make sure the amounts are negative
+                    if is_refund:  # is_refund is now only true for out_refund
+                        # For refunds, we need the negative amounts for balance calculations
+                        # This is crucial for reports to show correct subtraction
+                        price_subtotal = -abs(price_subtotal)
+                        tax_amount = -abs(tax_amount)
+                        _logger.info(f"Adjusted amounts for refund: price_subtotal={price_subtotal}, tax_amount={tax_amount}")
+                    
                     # Add to group
                     tax_groups[tax.amount]['base'] += price_subtotal
                     tax_groups[tax.amount]['tax'] += tax_amount
@@ -144,32 +258,54 @@ class KontrolnyVykaz(models.Model):
                     continue
                 
                 if has_vat_id:
-                    # Create individual A section line for each entity with Slovak VAT ID
+                    # Create individual line for each entity with Slovak VAT ID
                     # regardless of x_platca_dph status
-                    self.env['kontrolny.vykaz.a.line'].create({
+                    line_vals = {
                         'kontrolny_vykaz_id': self.id,
-                        'partner_id': invoice.partner_id.id,
-                        'partner_vat': invoice.partner_id.vat,
-                        'invoice_id': invoice.id,
-                        'invoice_number': invoice.name,
-                        'invoice_date': invoice.invoice_date,
-                        'supply_date': invoice.taxable_supply_date,
+                        'partner_id': document.partner_id.id,
+                        'partner_vat': document.partner_id.vat,
+                        'invoice_id': document.id,
+                        'invoice_number': document.name,
+                        'invoice_date': document.invoice_date,
+                        'supply_date': effective_date,
                         'base_amount': amounts['base'],
                         'tax_rate': tax_rate,
                         'tax_amount': amounts['tax'],
-                    })
-                else:
-                    # Add to individuals summary
-                    if tax_rate not in individuals_tax_groups:
-                        individuals_tax_groups[tax_rate] = {
-                            'base': 0.0,
-                            'tax': 0.0,
-                            'count': 0
-                        }
+                        'is_refund': is_refund,  # Flag for credit notes
+                    }
                     
-                    individuals_tax_groups[tax_rate]['base'] += amounts['base']
-                    individuals_tax_groups[tax_rate]['tax'] += amounts['tax']
-                    individuals_tax_groups[tax_rate]['count'] += 1
+                    # Log creation of line
+                    _logger.info(f"Creating {'refund' if is_refund else 'invoice'} line with values: {line_vals}")
+                    
+                    # Create the line and log its ID to track it
+                    new_line = self.env['kontrolny.vykaz.a.line'].create(line_vals)
+                    _logger.info(f"Created line ID {new_line.id} with is_refund={new_line.is_refund}")
+                else:
+                    # For non-VAT ID partners, add to summary (individuals for invoices, separate for refunds)
+                    if is_refund:
+                        # Track refunds without VAT ID separately
+                        if tax_rate not in refunds_tax_groups:
+                            refunds_tax_groups[tax_rate] = {
+                                'base': 0.0,
+                                'tax': 0.0,
+                                'count': 0
+                            }
+                        
+                        refunds_tax_groups[tax_rate]['base'] += amounts['base']
+                        refunds_tax_groups[tax_rate]['tax'] += amounts['tax']
+                        refunds_tax_groups[tax_rate]['count'] += 1
+                    else:
+                        # Regular individuals (without refunds)
+                        if tax_rate not in individuals_tax_groups:
+                            individuals_tax_groups[tax_rate] = {
+                                'base': 0.0,
+                                'tax': 0.0,
+                                'count': 0
+                            }
+                        
+                        individuals_tax_groups[tax_rate]['base'] += amounts['base']
+                        individuals_tax_groups[tax_rate]['tax'] += amounts['tax']
+                        individuals_tax_groups[tax_rate]['count'] += 1
         
         # Create summary lines for individuals
         for tax_rate, data in individuals_tax_groups.items():
@@ -186,6 +322,28 @@ class KontrolnyVykaz(models.Model):
                     'tax_rate': tax_rate,
                     'tax_amount': data['tax'],
                     'is_summary': True,
+                    'is_refund': False,
+                })
+                
+        # Create summary lines for refunds without VAT ID
+        for tax_rate, data in refunds_tax_groups.items():
+            # Before creating refund summary, log what we're about to create
+            _logger.info(f"Creating refund summary for tax_rate {tax_rate} with base={data['base']}, tax={data['tax']}, count={data['count']}")
+            
+            if data['base'] != 0:  # Changed from > 0 to != 0 to catch negative values too
+                self.env['kontrolny.vykaz.a.line'].create({
+                    'kontrolny_vykaz_id': self.id,
+                    'partner_id': False,
+                    'partner_vat': 'Refunds',
+                    'invoice_id': False,
+                    'invoice_number': f'Súhrn ({data["count"]} dobropisov)',
+                    'invoice_date': self.date_to,
+                    'supply_date': self.date_to,
+                    'base_amount': data['base'],
+                    'tax_rate': tax_rate,
+                    'tax_amount': data['tax'],
+                    'is_summary': True,
+                    'is_refund': True,  # Explicitly set is_refund to True
                 })
     
     def action_confirm(self):
@@ -249,8 +407,10 @@ class KontrolnyVykaz(models.Model):
         
         # Process regular Section A lines (A1 transactions - sales with VAT)
         # Only include lines with VAT-registered customers (exclude summary lines for individuals)
-        for line in self.a_section_line_ids.filtered(lambda l: not l.is_summary):
-            if line.base_amount <= 0:
+        for line in self.a_section_line_ids.filtered(lambda l: not l.is_summary and not l.is_refund):
+            # Process both regular and reversed invoices for A1 section
+            # Skip if base amount is zero
+            if line.base_amount == 0:
                 continue
                 
             # Format date as YYYY-MM-DD
@@ -267,9 +427,58 @@ class KontrolnyVykaz(models.Model):
                 
             a1.set("F", line.invoice_number or '')
             a1.set("Den", date_str)
-            a1.set("Z", "{:.2f}".format(line.base_amount))
-            a1.set("D", "{:.2f}".format(line.tax_amount))
+            a1.set("Z", "{:.2f}".format(abs(line.base_amount)))  # Use absolute value for display
+            a1.set("D", "{:.2f}".format(abs(line.tax_amount)))   # Use absolute value for display
             a1.set("S", str(int(line.tax_rate)))
+        
+        # Process credit notes (C1 transactions - refunds with VAT)
+        refund_lines = self.a_section_line_ids.filtered(lambda l: not l.is_summary and l.is_refund)
+        _logger.info(f"Found {len(refund_lines)} refund lines to process in C1 section")
+        
+        # Log all a_section_line_ids to debug why refunds might not be found
+        _logger.info("***** All a_section_line_ids *****")
+        for line in self.a_section_line_ids:
+            _logger.info(f"Line: invoice_number={line.invoice_number}, is_refund={line.is_refund}, is_summary={line.is_summary}, base_amount={line.base_amount}")
+        
+        for line in refund_lines:
+            # Skip lines with zero base amount
+            if line.base_amount == 0:
+                continue
+                
+            # Log for debugging
+            _logger.info(f"Processing refund line: {line.invoice_number}, base_amount: {line.base_amount}, is_refund: {line.is_refund}")
+            
+            # Format date as YYYY-MM-DD
+            date_str = line.supply_date.strftime('%Y-%m-%d') if line.supply_date else ''
+            
+            # Create C1 element with attributes (for credit notes)
+            c1 = ET.SubElement(transactions, "C1")
+            
+            # For VAT-registered customers, check if they're marked as VAT payers (x_platca_dph)
+            if line.partner_id and hasattr(line.partner_id, 'x_platca_dph') and line.partner_id.x_platca_dph and line.partner_vat and line.partner_vat.upper().startswith('SK'):
+                c1.set("Odb", line.partner_vat)
+            else:
+                c1.set("Odb", "")  # Empty for non-VAT customers or when x_platca_dph is False
+            
+            # For refunds, try to get the original invoice number if available
+            original_invoice_number = ""
+            if line.invoice_id and line.invoice_id.reversed_entry_id:
+                original_invoice_number = line.invoice_id.reversed_entry_id.name
+                _logger.info(f"Using original invoice number: {original_invoice_number} for refund {line.invoice_number}")
+            elif line.invoice_id and line.invoice_id.ref and "Obrátenie z:" in line.invoice_id.ref:
+                # Extract original invoice number from the reference
+                original_invoice_number = line.invoice_id.ref.replace("Obrátenie z:", "").strip()
+                _logger.info(f"Extracted original invoice number from ref: {original_invoice_number} for refund {line.invoice_number}")
+            
+            # FO should be the refund number, FP should be the original invoice number
+            c1.set("FP", line.invoice_number or '')  # Refund number
+            if original_invoice_number:
+                c1.set("FO", original_invoice_number)  # Original invoice number
+            c1.set("Den", date_str)
+            # Use negative values for credit notes in XML for the actual calculation
+            c1.set("Z", "{:.2f}".format(-abs(line.base_amount)))  # Negative for refund
+            c1.set("D", "{:.2f}".format(-abs(line.tax_amount)))   # Negative for refund
+            c1.set("S", str(int(line.tax_rate)))
         
         # If we had credit notes (C1 transactions), we would add them here
         # For example:
@@ -280,11 +489,23 @@ class KontrolnyVykaz(models.Model):
         
         # Add totals section (D2) - This includes all transactions including those for individuals
         # The total amounts include both regular A1 lines and summary lines (individuals without VAT ID)
+        # and are adjusted for refunds (C1 records)
         d2 = ET.SubElement(transactions, "D2")
-        d2.set("Z", "{:.2f}".format(self.total_a_base))
-        d2.set("D", "{:.2f}".format(self.total_a_tax))
-        d2.set("ZZn", "0.00")
-        d2.set("DZn", "0.00")
+        
+        # Calculate total amounts properly considering all sections
+        total_base = self.total_a_base + self.total_c_base
+        total_tax = self.total_a_tax + self.total_c_tax
+        
+        # Log the totals for debugging
+        _logger.info(f"D2 Totals - Base: {total_base}, Tax: {total_tax}")
+        _logger.info(f"Section A - Base: {self.total_a_base}, Tax: {self.total_a_tax}")
+        _logger.info(f"Section C - Base: {self.total_c_base}, Tax: {self.total_c_tax}")
+        
+        # Add special handling for negative amounts (when refunds > regular invoices)
+        d2.set("Z", "{:.2f}".format(total_base if total_base >= 0 else 0))
+        d2.set("D", "{:.2f}".format(total_tax if total_tax >= 0 else 0))
+        d2.set("ZZn", "{:.2f}".format(abs(total_base) if total_base < 0 else 0))
+        d2.set("DZn", "{:.2f}".format(abs(total_tax) if total_tax < 0 else 0))
         
         # Convert to properly formatted XML string
         rough_string = ET.tostring(root, 'utf-8')
@@ -439,23 +660,48 @@ class KontrolnyVykaz(models.Model):
             else:
                 worksheet.write(row, 12, '')                                     # Odb (empty for non-VAT payers)
                 
-            worksheet.write(row, 13, line.invoice_number or '')              # F (invoice number)
-            worksheet.write(row, 14, date_str)                               # Den (date)
-            worksheet.write(row, 15, line.base_amount, number_format)        # Z (base amount)
-            worksheet.write(row, 16, line.tax_amount, number_format)         # D (tax amount)
-            worksheet.write(row, 17, int(line.tax_rate))                     # S (tax rate)
+            # Invoice/refund specific fields
+            if line.is_refund:
+                # For refunds (C1)
+                worksheet.write(row, 13, '')                                     # F (empty for refunds)
+                worksheet.write(row, 14, '')                                     # Den (empty for refunds)
+                worksheet.write(row, 15, '')                                     # Z (empty for refunds)
+                worksheet.write(row, 16, '')                                     # D (empty for refunds)
+                worksheet.write(row, 17, '')                                     # S (empty for refunds)
+                
+                # Refund fields
+                worksheet.write(row, 18, '')                                     # Odb2 (usually empty)
+                worksheet.write(row, 19, line.invoice_number or '')              # FO (original invoice number)
+                worksheet.write(row, 20, '')                                     # FP (usually empty)
+                # Use absolute values for the Excel export
+                worksheet.write(row, 21, abs(line.base_amount), number_format)   # ZR (refund base amount)
+                worksheet.write(row, 22, abs(line.tax_amount), number_format)    # DR (refund tax amount)
+                worksheet.write(row, 23, int(line.tax_rate))                     # S3 (tax rate for refunds) 
+            else:
+                # For regular invoices (A1)
+                worksheet.write(row, 13, line.invoice_number or '')              # F (invoice number)
+                worksheet.write(row, 14, date_str)                               # Den (date)
+                worksheet.write(row, 15, line.base_amount, number_format)        # Z (base amount)
+                worksheet.write(row, 16, line.tax_amount, number_format)         # D (tax amount)
+                worksheet.write(row, 17, int(line.tax_rate))                     # S (tax rate)
+                
+                # Empty refund fields
+                worksheet.write(row, 18, '')                                     # Odb2
+                worksheet.write(row, 19, '')                                     # FO
+                worksheet.write(row, 20, '')                                     # FP
+                worksheet.write(row, 21, '')                                     # ZR
+                worksheet.write(row, 22, '')                                     # DR
+                worksheet.write(row, 23, '')                                     # S3
             
-            # Extra columns (mostly empty for regular entries)
-            worksheet.write(row, 18, '')  # Odb2
-            worksheet.write(row, 19, '')  # FO
-            worksheet.write(row, 20, '')  # FP
-            worksheet.write(row, 21, '')  # ZR
-            worksheet.write(row, 22, '')  # DR
-            worksheet.write(row, 23, '')  # S3
-            worksheet.write(row, 24, self.total_a_base, number_format)  # Z4 (total base)
-            worksheet.write(row, 25, self.total_a_tax, number_format)   # D5 (total tax)
-            worksheet.write(row, 26, 0)   # ZZn
-            worksheet.write(row, 27, 0)   # DZn
+            # Calculate total amounts considering refunds
+            total_base = self.total_a_base
+            total_tax = self.total_a_tax
+            
+            # Totals with special handling for negative values
+            worksheet.write(row, 24, total_base if total_base >= 0 else 0, number_format)  # Z4 (total base)
+            worksheet.write(row, 25, total_tax if total_tax >= 0 else 0, number_format)    # D5 (total tax)
+            worksheet.write(row, 26, abs(total_base) if total_base < 0 else 0)             # ZZn
+            worksheet.write(row, 27, abs(total_tax) if total_tax < 0 else 0)               # DZn
             
             row += 1
         
@@ -562,3 +808,5 @@ class KontrolnyVykazALine(models.Model):
     currency_id = fields.Many2one(related='kontrolny_vykaz_id.currency_id')
     is_summary = fields.Boolean(string='Je súhrnný riadok', default=False,
                              help='Toto je súhrnný riadok pre fyzické osoby bez IČ DPH')
+    is_refund = fields.Boolean(string='Je dobropis', default=False,
+                             help='Toto je dobropis (faktúra so zápornou hodnotou)')

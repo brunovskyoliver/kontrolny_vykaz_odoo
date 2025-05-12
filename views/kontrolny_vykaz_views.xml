@@ -12,8 +12,10 @@
                 <field name="date_from"/>
                 <field name="date_to"/>
                 <field name="company_id" groups="base.group_multi_company"/>
-                <field name="total_a_base" sum="Základ dane celkom"/>
-                <field name="total_a_tax" sum="DPH celkom"/>
+                <field name="total_a_base" sum="Základ dane oddiel A"/>
+                <field name="total_a_tax" sum="DPH oddiel A"/>
+                <field name="total_c_base" sum="Základ dane oddiel C"/>
+                <field name="total_c_tax" sum="DPH oddiel C"/>
                 <field name="state"/>
             </list>
         </field>
@@ -65,13 +67,16 @@
                     <group string="Súhrn" invisible="state == 'draft'">
                         <field name="total_a_base" widget="monetary"/>
                         <field name="total_a_tax" widget="monetary"/>
-                        <!--<div class="alert alert-info text-center" role="alert" invisible="state != 'exported'">
+                        <field name="total_c_base" widget="monetary"/>
+                        <field name="total_c_tax" widget="monetary"/>
+                        <!-- <div class="alert alert-info text-center" role="alert" invisible="state != 'exported'">
                             <strong>Poznámka:</strong> V súlade s požiadavkami finančnej správy, súhrnné záznamy pre fyzické osoby 
                             bez IČ DPH sú zahrnuté v celkových sumách, ale nie sú zobrazené ako samostatné A1 záznamy v XML súbore.
                         </div>
                         <div class="alert alert-warning text-center" role="alert" invisible="state != 'exported'">
-                            <strong>Upozornenie:</strong> Záznamy pre partnerov s IČ DPH SK, ktorí majú nastavené pole 'x_platca_dph' na Nepravda, 
-                            budú zahrnuté v XML exporte bez čísla IČ DPH v atribúte Odb.
+                            <strong>Upozornenie:</strong> Záznamy pre subjekty s IČ DPH SK sú zahrnuté ako samostatné A1/C1 záznamy.
+                            Ale ich IČ DPH sa zobrazí v atribúte Odb len ak majú x_platca_dph=Pravda, inak bude atribút Odb prázdny.
+                            Dobropisy sú exportované ako záznamy C1 s rovnakým pravidlom pre atribút Odb.
                         </div> -->
                     </group>
                     
@@ -86,7 +91,7 @@
                     <!-- Section A - Customer Invoices -->
                     <notebook>
                         <page string="Oddiel A - Faktúry pre odberateľov" invisible="state == 'draft'">
-                            <field name="a_section_line_ids">
+                            <field name="a_section_line_ids" domain="[('is_refund', '=', False)]">
                                 <list>
                                     <field name="partner_id"/>
                                     <field name="partner_vat"/>
@@ -97,6 +102,8 @@
                                     <field name="tax_rate"/>
                                     <field name="tax_amount" sum="DPH celkom"/>
                                     <field name="is_summary" invisible="1"/>
+                                    <field name="is_refund" invisible="1"/>
+                                    <field name="invoice_id" invisible="1"/>
                                 </list>
                                 <form>
                                     <group>
@@ -106,6 +113,7 @@
                                             <field name="invoice_id"/>
                                             <field name="invoice_number"/>
                                             <field name="is_summary"/>
+                                            <field name="is_refund"/>
                                         </group>
                                         <group>
                                             <field name="invoice_date"/>
@@ -119,6 +127,43 @@
                                 </form>
                             </field>
                         </page>
+                        <!-- <page string="Oddiel C - Dobropisy" invisible="state == 'draft'">
+                            <field name="a_section_line_ids" domain="[('is_refund', '=', True)]">
+                                <list>
+                                    <field name="partner_id"/>
+                                    <field name="partner_vat"/>
+                                    <field name="invoice_number"/>
+                                    <field name="invoice_date"/>
+                                    <field name="supply_date"/>
+                                    <field name="base_amount" sum="Základ dane celkom"/>
+                                    <field name="tax_rate"/>
+                                    <field name="tax_amount" sum="DPH celkom"/>
+                                    <field name="is_summary" invisible="1"/>
+                                    <field name="is_refund" invisible="1"/>
+                                    <field name="invoice_id" invisible="1"/>
+                                </list>
+                                <form>
+                                    <group>
+                                        <group>
+                                            <field name="partner_id"/>
+                                            <field name="partner_vat"/>
+                                            <field name="invoice_id"/> 
+                                            <field name="invoice_number"/>
+                                            <field name="is_summary"/>
+                                            <field name="is_refund"/>
+                                        </group>
+                                        <group>
+                                            <field name="invoice_date"/>
+                                            <field name="supply_date"/>
+                                            <field name="base_amount"/>
+                                            <field name="tax_rate"/>
+                                            <field name="tax_amount"/>
+                                            <field name="currency_id" invisible="1"/>
+                                        </group>
+                                    </group>
+                                </form>
+                            </field>
+                        </page> -->
                     </notebook>
                 </sheet>
                 <div class="oe_chatter">

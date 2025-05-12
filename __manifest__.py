@@ -1,6 +1,6 @@
 {
     'name': 'Slovak Tax Control Statement',
-    'version': '18.0.1.0.0',
+    'version': '18.0.1.1.0',
     'category': 'Accounting/Localizations/Reporting',
     'license': 'LGPL-3',
     'summary': 'Slovak Tax Control Statement (Kontrolný výkaz DPH)',
