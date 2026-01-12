@@ -230,6 +230,11 @@ class KontrolnyVykaz(models.Model):
                     
                 # Process only lines with VAT taxes
                 for tax in line.tax_ids:
+                    # Skip lines with 0% VAT
+                    if tax.amount == 0:
+                        _logger.info(f"Skipping line with 0% VAT from {document.name}")
+                        continue
+                        
                     if tax.amount not in tax_groups:
                         tax_groups[tax.amount] = {
                             'base': 0.0,
@@ -256,6 +261,8 @@ class KontrolnyVykaz(models.Model):
             for tax_rate, amounts in tax_groups.items():
                 if amounts['base'] == 0:
                     continue
+                
+                _logger.info(f"Processing tax rate {tax_rate}% for document {document.name}: base={amounts['base']}, tax={amounts['tax']}")
                 
                 if has_vat_id:
                     # Create individual line for each entity with Slovak VAT ID
